@@ -1,0 +1,21 @@
+[server]
+bind_address = ":8080"
+read_timeout = "15s"
+write_timeout = "15s"
+idle_timeout = "60s"
+shutdown_timeout = "10s"
+
+[uploads]
+max_upload_size = 67108864
+
+[storage]
+driver = "filesystem"
+root_dir = "./data/files"
+
+[metadata]
+sqlite_path = "./data/lesac.db"
+
+[cleanup]
+enabled = true
+interval = "1m"
+batch_size = 100
