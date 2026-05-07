@@ -28,6 +28,8 @@ func TestSaveGetListExpiredDelete(t *testing.T) {
 	meta := domain.FileMeta{
 		ID:         id,
 		StorageKey: "ab/cd/abcdefghijklmnop",
+		MIMEType:   "text/plain",
+		Extension:  "txt",
 		CreatedAt:  now,
 		ExpiresAt:  &exp,
 	}
@@ -41,6 +43,12 @@ func TestSaveGetListExpiredDelete(t *testing.T) {
 	}
 	if loaded.StorageKey != meta.StorageKey {
 		t.Fatalf("unexpected storage key: %q", loaded.StorageKey)
+	}
+	if loaded.MIMEType != meta.MIMEType {
+		t.Fatalf("unexpected mimetype: %q", loaded.MIMEType)
+	}
+	if loaded.Extension != meta.Extension {
+		t.Fatalf("unexpected extension: %q", loaded.Extension)
 	}
 
 	expired, err := store.ListExpired(context.Background(), now.Add(20*time.Second), 100)

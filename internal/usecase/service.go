@@ -26,16 +26,24 @@ type Service struct {
 	now         func() time.Time
 }
 
+// PutFileMeta describes metadata associated with an uploaded file.
+type PutFileMeta struct {
+	MIMEType  string
+	Extension string
+}
+
 // PutBatchItem represents one file payload in a batch upload.
 type PutBatchItem struct {
-	Body []byte
+	Body     []byte
+	Metadata PutFileMeta
 }
 
 // PutBatchResult contains the result for one batch item.
 type PutBatchResult struct {
-	Index int
-	ID    domain.FileID
-	Err   error
+	Index    int
+	ID       domain.FileID
+	Metadata PutFileMeta
+	Err      error
 }
 
 // NewService creates a Service with optional ID generator and clock overrides.
@@ -64,6 +72,7 @@ func (s *Service) Put(
 	ctx context.Context,
 	body io.Reader,
 	lifetimeSeconds *int64,
+	fileMeta PutFileMeta,
 ) (domain.FileID, error) {
 	if lifetimeSeconds != nil && *lifetimeSeconds <= 0 {
 		return "", domain.ErrInvalidLifetime
@@ -90,6 +99,8 @@ func (s *Service) Put(
 	meta := domain.FileMeta{
 		ID:         id,
 		StorageKey: storageKey,
+		MIMEType:   fileMeta.MIMEType,
+		Extension:  fileMeta.Extension,
 		CreatedAt:  now,
 		ExpiresAt:  expiresAt,
 	}
@@ -119,36 +130,37 @@ func (s *Service) PutBatch(
 
 	results := make([]PutBatchResult, 0, len(items))
 	for i, item := range items {
-		id, err := s.Put(ctx, bytes.NewReader(item.Body), lifetimeSeconds)
+		id, err := s.Put(ctx, bytes.NewReader(item.Body), lifetimeSeconds, item.Metadata)
 		results = append(results, PutBatchResult{
-			Index: i,
-			ID:    id,
-			Err:   err,
+			Index:    i,
+			ID:       id,
+			Metadata: item.Metadata,
+			Err:      err,
 		})
 	}
 	return results, nil
 }
 
 // Get returns the stored file body for the given file ID.
-func (s *Service) Get(ctx context.Context, id domain.FileID) (io.ReadCloser, error) {
+func (s *Service) Get(ctx context.Context, id domain.FileID) (io.ReadCloser, domain.FileMeta, error) {
 	meta, err := s.metadata.Get(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, domain.FileMeta{}, err
 	}
 
 	if meta.IsExpired(s.now().UTC()) {
-		return nil, domain.ErrNotFound
+		return nil, domain.FileMeta{}, domain.ErrNotFound
 	}
 
 	reader, err := s.blobs.Get(ctx, meta.StorageKey)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			_ = s.metadata.Delete(ctx, id)
-			return nil, domain.ErrNotFound
+			return nil, domain.FileMeta{}, domain.ErrNotFound
 		}
-		return nil, err
+		return nil, domain.FileMeta{}, err
 	}
-	return reader, nil
+	return reader, meta, nil
 }
 
 // Delete removes a stored file and its metadata for the given file ID.

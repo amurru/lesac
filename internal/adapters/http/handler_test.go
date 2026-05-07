@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,9 +38,9 @@ func TestPutGetDeleteIntegration(t *testing.T) {
 	server := httptest.NewServer(NewHandler(service, 1024))
 	defer server.Close()
 
-	putResp, err := http.DefaultClient.Do(
-		mustRequest(http.MethodPut, server.URL+"/v1/files", []byte("hello")),
-	)
+	putReq := mustRequest(http.MethodPut, server.URL+"/v1/files", []byte("hello"))
+	putReq.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	putResp, err := http.DefaultClient.Do(putReq)
 	if err != nil {
 		t.Fatalf("put request failed: %v", err)
 	}
@@ -50,8 +51,10 @@ func TestPutGetDeleteIntegration(t *testing.T) {
 	}
 
 	var putBody struct {
-		ID  string `json:"id"`
-		URL string `json:"url"`
+		ID        string `json:"id"`
+		URL       string `json:"url"`
+		MIMEType  string `json:"mimetype"`
+		Extension string `json:"extension"`
 	}
 	if err := json.NewDecoder(putResp.Body).Decode(&putBody); err != nil {
 		t.Fatalf("decode put response failed: %v", err)
@@ -62,6 +65,12 @@ func TestPutGetDeleteIntegration(t *testing.T) {
 	if putBody.URL != server.URL+"/v1/files/"+putBody.ID {
 		t.Fatalf("unexpected url: %q", putBody.URL)
 	}
+	if putBody.MIMEType != "text/plain" {
+		t.Fatalf("unexpected mimetype: %q", putBody.MIMEType)
+	}
+	if putBody.Extension != "txt" {
+		t.Fatalf("unexpected extension: %q", putBody.Extension)
+	}
 
 	getResp, err := http.Get(server.URL + "/v1/files/" + putBody.ID)
 	if err != nil {
@@ -71,6 +80,9 @@ func TestPutGetDeleteIntegration(t *testing.T) {
 
 	if getResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", getResp.StatusCode)
+	}
+	if !strings.HasPrefix(getResp.Header.Get("Content-Type"), "text/plain") {
+		t.Fatalf("unexpected get content type: %q", getResp.Header.Get("Content-Type"))
 	}
 
 	deleteReq, err := http.NewRequest(http.MethodDelete, server.URL+"/v1/files/"+putBody.ID, nil)
@@ -128,6 +140,58 @@ func TestPutTooLarge(t *testing.T) {
 	}
 }
 
+func TestPutSniffsMIMETypeForCurlDefaultContentType(t *testing.T) {
+	temp := t.TempDir()
+	metadataStore, err := sqlite.NewStore(filepath.Join(temp, "lesac.db"))
+	if err != nil {
+		t.Fatalf("new sqlite store failed: %v", err)
+	}
+	defer metadataStore.Close()
+
+	blobStore, err := filesystem.NewStore(filepath.Join(temp, "files"))
+	if err != nil {
+		t.Fatalf("new filesystem store failed: %v", err)
+	}
+
+	service := usecase.NewService(metadataStore, blobStore, nil, nil)
+	server := httptest.NewServer(NewHandler(service, 1024*1024))
+	defer server.Close()
+
+	jpegHeader := []byte{
+		0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00,
+		0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+	}
+	body := append(jpegHeader, bytes.Repeat([]byte{0x00}, 600)...)
+
+	req := mustRequest(http.MethodPut, server.URL+"/v1/files", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("put request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		ID        string `json:"id"`
+		MIMEType  string `json:"mimetype"`
+		Extension string `json:"extension"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode put response failed: %v", err)
+	}
+
+	if payload.MIMEType != "image/jpeg" {
+		t.Fatalf("expected image/jpeg, got %q", payload.MIMEType)
+	}
+	if payload.Extension != "jpg" && payload.Extension != "jpeg" {
+		t.Fatalf("expected jpg or jpeg extension, got %q", payload.Extension)
+	}
+}
+
 func TestBatchPutSuccess(t *testing.T) {
 	temp := t.TempDir()
 	metadataStore, err := sqlite.NewStore(filepath.Join(temp, "lesac.db"))
@@ -161,9 +225,11 @@ func TestBatchPutSuccess(t *testing.T) {
 
 	var payload struct {
 		Results []struct {
-			Index int    `json:"index"`
-			ID    string `json:"id"`
-			URL   string `json:"url"`
+			Index     int    `json:"index"`
+			ID        string `json:"id"`
+			URL       string `json:"url"`
+			MIMEType  string `json:"mimetype"`
+			Extension string `json:"extension"`
 		} `json:"results"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
@@ -180,6 +246,16 @@ func TestBatchPutSuccess(t *testing.T) {
 	}
 	if payload.Results[1].URL != server.URL+"/v1/files/"+payload.Results[1].ID {
 		t.Fatalf("unexpected second result url: %q", payload.Results[1].URL)
+	}
+	if payload.Results[0].MIMEType != "application/octet-stream" || payload.Results[1].MIMEType != "application/octet-stream" {
+		t.Fatalf(
+			"expected application/octet-stream mimetype, got %q and %q",
+			payload.Results[0].MIMEType,
+			payload.Results[1].MIMEType,
+		)
+	}
+	if payload.Results[0].Extension != "txt" || payload.Results[1].Extension != "txt" {
+		t.Fatalf("expected txt extensions, got %q and %q", payload.Results[0].Extension, payload.Results[1].Extension)
 	}
 }
 

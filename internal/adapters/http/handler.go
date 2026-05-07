@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -48,12 +50,23 @@ func (h *Handler) handleCollection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body := r.Body
+	var body io.Reader = r.Body
 	if h.maxUploadBytes > 0 {
 		body = http.MaxBytesReader(w, r.Body, h.maxUploadBytes)
 	}
 
-	id, err := h.service.Put(r.Context(), body, lifetime)
+	meta, body, err := extractPutUploadMeta(r.Header.Get("Content-Type"), body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		switch {
+		case errors.As(err, &tooLarge):
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "upload too large")
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "failed to read file")
+		}
+		return
+	}
+	id, err := h.service.Put(r.Context(), body, lifetime, meta)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		switch {
@@ -70,8 +83,10 @@ func (h *Handler) handleCollection(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"id":  id.String(),
-		"url": fileURL(r, id),
+		"id":        id.String(),
+		"url":       fileURL(r, id),
+		"mimetype":  meta.MIMEType,
+		"extension": meta.Extension,
 	})
 }
 
@@ -154,6 +169,8 @@ func (h *Handler) handleBatchPut(w http.ResponseWriter, r *http.Request) {
 		} else {
 			item["id"] = result.ID.String()
 			item["url"] = fileURL(r, result.ID)
+			item["mimetype"] = result.Metadata.MIMEType
+			item["extension"] = result.Metadata.Extension
 			successCount++
 		}
 		responseItems = append(responseItems, item)
@@ -172,7 +189,7 @@ func (h *Handler) handleBatchPut(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, id domain.FileID) {
-	body, err := h.service.Get(r.Context(), id)
+	body, meta, err := h.service.Get(r.Context(), id)
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrNotFound):
@@ -184,7 +201,11 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request, id domain.Fi
 	}
 	defer body.Close()
 
-	w.Header().Set("Content-Type", "application/octet-stream")
+	contentType := meta.MIMEType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, body)
 }
@@ -243,12 +264,16 @@ func readBatchItems(reader *multipart.Reader) ([]usecase.PutBatchItem, error) {
 			continue
 		}
 
+		itemMeta := extractUploadMeta(part.Header.Get("Content-Type"), part.FileName())
 		data, err := io.ReadAll(part)
 		_ = part.Close()
 		if err != nil {
 			return nil, err
 		}
-		items = append(items, usecase.PutBatchItem{Body: bytes.Clone(data)})
+		items = append(items, usecase.PutBatchItem{
+			Body:     bytes.Clone(data),
+			Metadata: itemMeta,
+		})
 	}
 
 	if len(items) == 0 {
@@ -272,4 +297,92 @@ func fileURL(r *http.Request, id domain.FileID) string {
 		scheme = "https"
 	}
 	return fmt.Sprintf("%s://%s/v1/files/%s", scheme, r.Host, id.String())
+}
+
+func extractUploadMeta(contentType, filename string) usecase.PutFileMeta {
+	mimeType := normalizeMIMEType(contentType)
+	extension := normalizeExtension(filepath.Ext(filename))
+	if extension == "" && mimeType != "" {
+		extension = extensionFromMIMEType(mimeType)
+	}
+	return usecase.PutFileMeta{
+		MIMEType:  mimeType,
+		Extension: extension,
+	}
+}
+
+func extractPutUploadMeta(contentType string, body io.Reader) (usecase.PutFileMeta, io.Reader, error) {
+	meta := extractUploadMeta(contentType, "")
+	if !shouldSniffMIMEType(meta.MIMEType) {
+		return meta, body, nil
+	}
+
+	const sniffBytes = 512
+	head := make([]byte, sniffBytes)
+	n, err := io.ReadFull(body, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return usecase.PutFileMeta{}, nil, err
+	}
+	head = head[:n]
+
+	sniffed := normalizeMIMEType(http.DetectContentType(head))
+	if sniffed != "" {
+		meta.MIMEType = sniffed
+		if meta.Extension == "" {
+			meta.Extension = extensionFromMIMEType(sniffed)
+		}
+	}
+	return meta, io.MultiReader(bytes.NewReader(head), body), nil
+}
+
+func shouldSniffMIMEType(mimeType string) bool {
+	switch mimeType {
+	case "", "application/octet-stream", "application/x-www-form-urlencoded":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeMIMEType(value string) string {
+	if value == "" {
+		return ""
+	}
+	mediaType, _, err := mime.ParseMediaType(value)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(mediaType)
+}
+
+func extensionFromMIMEType(mimeType string) string {
+	extensions, err := mime.ExtensionsByType(mimeType)
+	if err != nil || len(extensions) == 0 {
+		return ""
+	}
+	preferred := preferredExtensionForMIMEType(mimeType)
+	if preferred != "" {
+		for _, candidate := range extensions {
+			if normalizeExtension(candidate) == preferred {
+				return preferred
+			}
+		}
+	}
+	return normalizeExtension(extensions[0])
+}
+
+func preferredExtensionForMIMEType(mimeType string) string {
+	switch mimeType {
+	case "text/plain":
+		return "txt"
+	case "image/jpeg":
+		return "jpg"
+	default:
+		return ""
+	}
+}
+
+func normalizeExtension(value string) string {
+	normalized := strings.TrimSpace(strings.ToLower(strings.TrimPrefix(value, ".")))
+	return normalized
 }

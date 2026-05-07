@@ -58,9 +58,11 @@ func (s *Store) Save(ctx context.Context, meta domain.FileMeta) error {
 
 	_, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO files (id, storage_key, created_at, expires_at) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO files (id, storage_key, mimetype, extension, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		meta.ID.String(),
 		meta.StorageKey,
+		meta.MIMEType,
+		meta.Extension,
 		meta.CreatedAt.UTC().Unix(),
 		expires,
 	)
@@ -80,9 +82,9 @@ func (s *Store) Get(ctx context.Context, id domain.FileID) (domain.FileMeta, err
 
 	err := s.db.QueryRowContext(
 		ctx,
-		`SELECT id, storage_key, created_at, expires_at FROM files WHERE id = ?`,
+		`SELECT id, storage_key, mimetype, extension, created_at, expires_at FROM files WHERE id = ?`,
 		id.String(),
-	).Scan(&meta.ID, &meta.StorageKey, &createdRaw, &expiresRaw)
+	).Scan(&meta.ID, &meta.StorageKey, &meta.MIMEType, &meta.Extension, &createdRaw, &expiresRaw)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.FileMeta{}, domain.ErrNotFound
@@ -126,7 +128,7 @@ func (s *Store) ListExpired(
 
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT id, storage_key, created_at, expires_at
+		`SELECT id, storage_key, mimetype, extension, created_at, expires_at
 		 FROM files
 		 WHERE expires_at IS NOT NULL AND expires_at <= ?
 		 ORDER BY expires_at ASC
@@ -146,7 +148,7 @@ func (s *Store) ListExpired(
 			createdRaw int64
 			expiresRaw sql.NullInt64
 		)
-		if err := rows.Scan(&meta.ID, &meta.StorageKey, &createdRaw, &expiresRaw); err != nil {
+		if err := rows.Scan(&meta.ID, &meta.StorageKey, &meta.MIMEType, &meta.Extension, &createdRaw, &expiresRaw); err != nil {
 			return nil, fmt.Errorf("scan expired metadata: %w", err)
 		}
 		meta.CreatedAt = time.Unix(createdRaw, 0).UTC()
@@ -168,6 +170,8 @@ func (s *Store) initSchema() error {
 CREATE TABLE IF NOT EXISTS files (
   id TEXT PRIMARY KEY,
   storage_key TEXT NOT NULL,
+  mimetype TEXT NOT NULL DEFAULT '',
+  extension TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
   expires_at INTEGER
 );
@@ -177,5 +181,49 @@ CREATE INDEX IF NOT EXISTS idx_files_expires_at ON files(expires_at);
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("init sqlite schema: %w", err)
 	}
+	requiredColumns := map[string]string{
+		"mimetype":  "TEXT NOT NULL DEFAULT ''",
+		"extension": "TEXT NOT NULL DEFAULT ''",
+	}
+	columns, err := s.fileColumns()
+	if err != nil {
+		return err
+	}
+	for name, definition := range requiredColumns {
+		if _, ok := columns[name]; ok {
+			continue
+		}
+		if _, err := s.db.Exec(fmt.Sprintf("ALTER TABLE files ADD COLUMN %s %s", name, definition)); err != nil {
+			return fmt.Errorf("add %s column: %w", name, err)
+		}
+	}
 	return nil
+}
+
+func (s *Store) fileColumns() (map[string]struct{}, error) {
+	rows, err := s.db.Query(`PRAGMA table_info(files)`)
+	if err != nil {
+		return nil, fmt.Errorf("read files columns: %w", err)
+	}
+	defer rows.Close()
+
+	columns := make(map[string]struct{})
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			typ       string
+			notNull   int
+			defaultV  sql.NullString
+			primaryPK int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultV, &primaryPK); err != nil {
+			return nil, fmt.Errorf("scan files column: %w", err)
+		}
+		columns[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate files columns: %w", err)
+	}
+	return columns, nil
 }

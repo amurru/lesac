@@ -35,6 +35,8 @@ func (id FileID) String() string {
 type FileMeta struct {
 	ID         FileID
 	StorageKey string
+	MIMEType   string
+	Extension  string
 	CreatedAt  time.Time
 	ExpiresAt  *time.Time
 }

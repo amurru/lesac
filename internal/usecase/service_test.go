@@ -98,7 +98,10 @@ func TestPutGetDeleteFlow(t *testing.T) {
 		func() time.Time { return time.Unix(1000, 0).UTC() },
 	)
 
-	id, err := service.Put(context.Background(), bytes.NewBufferString("hello"), nil)
+	id, err := service.Put(context.Background(), bytes.NewBufferString("hello"), nil, PutFileMeta{
+		MIMEType:  "text/plain",
+		Extension: "txt",
+	})
 	if err != nil {
 		t.Fatalf("put failed: %v", err)
 	}
@@ -106,11 +109,17 @@ func TestPutGetDeleteFlow(t *testing.T) {
 		t.Fatalf("unexpected id: %s", id)
 	}
 
-	reader, err := service.Get(context.Background(), id)
+	reader, meta, err := service.Get(context.Background(), id)
 	if err != nil {
 		t.Fatalf("get failed: %v", err)
 	}
 	defer reader.Close()
+	if meta.MIMEType != "text/plain" {
+		t.Fatalf("unexpected mime type: %q", meta.MIMEType)
+	}
+	if meta.Extension != "txt" {
+		t.Fatalf("unexpected extension: %q", meta.Extension)
+	}
 
 	data, err := io.ReadAll(reader)
 	if err != nil {
@@ -134,7 +143,7 @@ func TestPutRejectsInvalidLifetime(t *testing.T) {
 	service := NewService(metadata, blobs, nil, nil)
 
 	invalid := int64(0)
-	_, err := service.Put(context.Background(), bytes.NewBufferString("x"), &invalid)
+	_, err := service.Put(context.Background(), bytes.NewBufferString("x"), &invalid, PutFileMeta{})
 	if !errors.Is(err, domain.ErrInvalidLifetime) {
 		t.Fatalf("expected invalid lifetime error, got: %v", err)
 	}
@@ -153,13 +162,13 @@ func TestGetExpiredReturnsNotFound(t *testing.T) {
 	)
 
 	lifetime := int64(1)
-	id, err := service.Put(context.Background(), bytes.NewBufferString("hello"), &lifetime)
+	id, err := service.Put(context.Background(), bytes.NewBufferString("hello"), &lifetime, PutFileMeta{})
 	if err != nil {
 		t.Fatalf("put failed: %v", err)
 	}
 
 	service.now = func() time.Time { return now.Add(2 * time.Second) }
-	_, err = service.Get(context.Background(), id)
+	_, _, err = service.Get(context.Background(), id)
 	if !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("expected not found for expired file, got: %v", err)
 	}
@@ -171,8 +180,8 @@ func TestPutBatchReturnsPerItemResults(t *testing.T) {
 
 	service := NewService(metadata, blobs, nil, nil)
 	items := []PutBatchItem{
-		{Body: []byte("one")},
-		{Body: []byte("two")},
+		{Body: []byte("one"), Metadata: PutFileMeta{MIMEType: "text/plain", Extension: "txt"}},
+		{Body: []byte("two"), Metadata: PutFileMeta{MIMEType: "application/json", Extension: "json"}},
 	}
 
 	results, err := service.PutBatch(context.Background(), items, nil)
@@ -191,6 +200,9 @@ func TestPutBatchReturnsPerItemResults(t *testing.T) {
 		}
 		if result.ID == "" {
 			t.Fatalf("expected id at position %d", i)
+		}
+		if result.Metadata != items[i].Metadata {
+			t.Fatalf("unexpected metadata at position %d: %+v", i, result.Metadata)
 		}
 	}
 }

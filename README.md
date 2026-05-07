@@ -19,10 +19,16 @@ Stores the raw request body as a file.
 
 - Query parameter: `lifetime` (optional, in seconds).
 - `lifetime=0` is invalid and returns `400`.
+- `mimetype` is derived from `Content-Type`; when missing/generic (for example `curl --data-binary` default), the server sniffs bytes to detect type.
 - Success response:
 
 ```json
-{ "id": "<unique-id>", "url": "http://<host>/v1/files/<unique-id>" }
+{
+  "id": "<unique-id>",
+  "url": "http://<host>/v1/files/<unique-id>",
+  "mimetype": "text/plain",
+  "extension": "txt"
+}
 ```
 
 Status: `201 Created`
@@ -43,7 +49,9 @@ Response body:
     {
       "index": 0,
       "id": "<unique-id>",
-      "url": "http://<host>/v1/files/<unique-id>"
+      "url": "http://<host>/v1/files/<unique-id>",
+      "mimetype": "image/png",
+      "extension": "png"
     },
     { "index": 1, "error": "failed to store file" }
   ]
@@ -61,6 +69,7 @@ Retrieves raw file bytes.
 
 - Status: `200 OK` on success.
 - Status: `404 Not Found` when file is missing or expired.
+- Response `Content-Type` is the stored file `mimetype` when available, otherwise `application/octet-stream`.
 
 ### `DELETE /v1/files/{id}`
 
