@@ -9,6 +9,7 @@ import http.client
 import json
 import ssl
 import sys
+import time
 from dataclasses import dataclass
 from typing import Dict
 from urllib.error import HTTPError, URLError
@@ -161,6 +162,18 @@ def main() -> int:
         help="HTTP timeout in seconds for source and destination requests",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=200,
+        help="Report progress and pause every N upload attempts",
+    )
+    parser.add_argument(
+        "--wait-for",
+        type=float,
+        default=5.0,
+        help="Seconds to sleep between batches (used with --batch-size)",
+    )
+    parser.add_argument(
         "--source-header",
         action="append",
         default=[],
@@ -184,6 +197,12 @@ def main() -> int:
     if args.lifetime is not None and args.lifetime <= 0:
         print("--lifetime must be a positive integer", file=sys.stderr)
         return 2
+    if args.batch_size <= 0:
+        print("--batch-size must be a positive integer", file=sys.stderr)
+        return 2
+    if args.wait_for < 0:
+        print("--wait-for must be zero or greater", file=sys.stderr)
+        return 2
 
     try:
         source_headers = parse_headers(args.source_header)
@@ -202,6 +221,7 @@ def main() -> int:
 
     total = 0
     success = 0
+    attempts = 0
     result_columns = [
         "LESAC_STATUS",
         "LESAC_ID",
@@ -244,6 +264,13 @@ def main() -> int:
                 writer.writerow(out_row)
                 continue
 
+            if attempts > 0 and attempts % args.batch_size == 0:
+                print(
+                    f"processed {attempts} upload attempts; sleeping for {args.wait_for:.3f}s",
+                    file=sys.stderr,
+                )
+                time.sleep(args.wait_for)
+
             try:
                 status_code, body = upload_stream(
                     source_url=source_url,
@@ -276,6 +303,8 @@ def main() -> int:
                     out_row["LESAC_ERROR"] = body
             except (HTTPError, URLError, TimeoutError, OSError, http.client.HTTPException) as err:
                 out_row["LESAC_ERROR"] = str(err)
+            finally:
+                attempts += 1
 
             writer.writerow(out_row)
 
