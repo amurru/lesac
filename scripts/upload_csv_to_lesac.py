@@ -7,6 +7,7 @@ import argparse
 import csv
 import http.client
 import json
+import ssl
 import sys
 from dataclasses import dataclass
 from typing import Dict
@@ -64,15 +65,21 @@ def upload_stream(
     source_headers: Dict[str, str],
     lesac_headers: Dict[str, str],
     timeout: float,
+    tls_context: ssl.SSLContext | None,
 ) -> tuple[int, str]:
     req = Request(source_url, headers=source_headers, method="GET")
-    with urlopen(req, timeout=timeout) as source_response:
+    with urlopen(req, timeout=timeout, context=tls_context) as source_response:
         conn_cls = (
             http.client.HTTPSConnection
             if endpoint.scheme == "https"
             else http.client.HTTPConnection
         )
-        conn = conn_cls(endpoint.host, endpoint.port, timeout=timeout)
+        if endpoint.scheme == "https":
+            conn = conn_cls(
+                endpoint.host, endpoint.port, timeout=timeout, context=tls_context
+            )
+        else:
+            conn = conn_cls(endpoint.host, endpoint.port, timeout=timeout)
         try:
             headers = {"Content-Type": mimetype or "application/octet-stream"}
             headers.update(lesac_headers)
@@ -142,6 +149,11 @@ def main() -> int:
         metavar="HEADER",
         help="Header for lesac PUT request, format: 'Name: Value' (repeatable)",
     )
+    parser.add_argument(
+        "--insecure-tls",
+        action="store_true",
+        help="Disable TLS certificate verification for both source and lesac HTTPS connections",
+    )
     args = parser.parse_args()
 
     if args.lifetime is not None and args.lifetime <= 0:
@@ -156,6 +168,12 @@ def main() -> int:
         print(str(err), file=sys.stderr)
         return 2
 
+    tls_context: ssl.SSLContext | None = None
+    if args.insecure_tls:
+        tls_context = ssl.create_default_context()
+        tls_context.check_hostname = False
+        tls_context.verify_mode = ssl.CERT_NONE
+
     total = 0
     success = 0
     result_columns = [
@@ -167,10 +185,9 @@ def main() -> int:
         "LESAC_ERROR",
     ]
 
-    with (
-        open(args.csv, newline="", encoding="utf-8") as csvfile,
-        open(args.output, "w", newline="", encoding="utf-8") as outfile,
-    ):
+    with open(args.csv, newline="", encoding="utf-8") as csvfile, open(
+        args.output, "w", newline="", encoding="utf-8"
+    ) as outfile:
         reader = csv.DictReader(csvfile)
         if not reader.fieldnames:
             print("input CSV has no header row", file=sys.stderr)
@@ -209,6 +226,7 @@ def main() -> int:
                     source_headers=source_headers,
                     lesac_headers=lesac_headers,
                     timeout=args.timeout,
+                    tls_context=tls_context,
                 )
                 if status_code == 201:
                     success += 1
