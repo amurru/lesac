@@ -16,6 +16,9 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 
+AUTO_CSV_ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
+
+
 @dataclass
 class LesacEndpoint:
     scheme: str
@@ -55,6 +58,23 @@ def build_endpoint(base_url: str, lifetime: int | None) -> LesacEndpoint:
         host=parsed.hostname,
         port=port,
         path=upload_path,
+    )
+
+
+def resolve_csv_encoding(csv_path: str, csv_encoding: str) -> str:
+    if csv_encoding.lower() != "auto":
+        return csv_encoding
+
+    for encoding in AUTO_CSV_ENCODINGS:
+        try:
+            with open(csv_path, newline="", encoding=encoding) as probe:
+                probe.read()
+            return encoding
+        except UnicodeDecodeError:
+            continue
+
+    raise ValueError(
+        "failed to decode CSV with auto-detect; specify --csv-encoding explicitly"
     )
 
 
@@ -102,6 +122,11 @@ def main() -> int:
         description="Stream source URLs from CSV directly into lesac."
     )
     parser.add_argument("--csv", default="test.csv", help="Path to input CSV file")
+    parser.add_argument(
+        "--csv-encoding",
+        default="auto",
+        help="CSV input encoding (default: auto; tries utf-8-sig, utf-8, cp1252, latin-1)",
+    )
     parser.add_argument(
         "--output",
         default="lesac_uploaded.csv",
@@ -164,6 +189,7 @@ def main() -> int:
         source_headers = parse_headers(args.source_header)
         lesac_headers = parse_headers(args.lesac_header)
         endpoint = build_endpoint(args.lesac_base, args.lifetime)
+        csv_encoding = resolve_csv_encoding(args.csv, args.csv_encoding)
     except ValueError as err:
         print(str(err), file=sys.stderr)
         return 2
@@ -185,7 +211,7 @@ def main() -> int:
         "LESAC_ERROR",
     ]
 
-    with open(args.csv, newline="", encoding="utf-8") as csvfile, open(
+    with open(args.csv, newline="", encoding=csv_encoding) as csvfile, open(
         args.output, "w", newline="", encoding="utf-8"
     ) as outfile:
         reader = csv.DictReader(csvfile)
@@ -261,6 +287,7 @@ def main() -> int:
                     "success": success,
                     "failed": total - success,
                     "output": args.output,
+                    "csv_encoding": csv_encoding,
                 }
             }
         ),
